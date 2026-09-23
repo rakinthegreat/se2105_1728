@@ -80,13 +80,23 @@ pnpm dev
 
 The application will be accessible at `http://localhost:5173` (or the configured `$PORT`).
 
-### Production Build
+### Production Build (Standalone Offline Single File)
+
+Running the build produces a completely self-contained, standalone single-file HTML bundle:
 
 ```bash
-# Build optimized static assets
+# Build standalone offline single-file presentation
 pnpm build
+```
 
-# Preview production build locally
+The resulting file is saved to:
+- **`presentation/dist/index.html`** (~2.6 MB)
+
+> [!NOTE]
+> All JavaScript, CSS, SVGs, and high-resolution images (raw low-light and enhanced photos) are fully inlined as base64 and embedded scripts. You can copy `dist/index.html` to any flash drive, send it via email, or open it directly by double-clicking on **any browser, any device, completely offline without Node.js or any local server running**.
+
+You can also test the build locally with:
+```bash
 pnpm preview
 ```
 
