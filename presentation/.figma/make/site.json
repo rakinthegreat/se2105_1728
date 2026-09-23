@@ -1,0 +1,10 @@
+{
+  "description": "Create professional academic defense presentations for software engineering projects, enhancing clarity and engagement through dynamic visuals and structured content.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
