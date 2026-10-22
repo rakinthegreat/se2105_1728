@@ -120,3 +120,75 @@ To determine precisely where and how much the two images differ, we developed [`
 
 ---
 
+## Phase 2
+
+### Overview
+- **Goal:** Implement the physical model of Retinex theory (separating illumination from reflectance via Gaussian surround filtering in log domain) and global logarithmic tone mapping (Stockham formulation per paper Eq. 4–5) on the $V$ (luminance) channel.
+- **Status:** Completed
+
+### Concepts & Mathematical Context
+1. **Retinex Physical Model:**
+   - Any image $I(x, y)$ can be modeled as the point-wise product of scene reflectance $R(x, y)$ (the physical properties of objects) and ambient illumination $L(x, y)$ (the light falling on them):
+     $$I(x, y) = L(x, y) \times R(x, y)$$
+   - When working within the HSV color space, this physical decomposition is applied specifically to the intensity/luminance channel $I(x, y) \equiv V(x, y)$ (the Value channel), isolating luminance while holding Hue ($H$) and Saturation ($S$) invariant:
+     $$V(x, y) = L(x, y) \times R(x, y)$$
+   - The goal is to isolate and enhance the true reflectance $R$ while compressing dynamic illumination variations $L$.
+2. **Log-Domain Subtraction:**
+   - In the logarithmic domain, multiplication converts to addition:
+     $$\log V(x, y) = \log L(x, y) + \log R(x, y)$$
+     $$\log R(x, y) = \log V(x, y) - \log L(x, y)$$
+3. **Single-Scale Retinex (SSR) (Paper Eq. 1–2):**
+   - The illumination component $L(x, y)$ is estimated by convolving the luminance input $V(x, y)$ with a normalized 2D Gaussian surround filter $F(x, y)$:
+     $$F(x, y) = K \cdot \exp\left(-\frac{x^2 + y^2}{\sigma^2}\right)$$
+     $$R_{\text{SSR}}(x, y) = \log V(x, y) - \log [F(x, y) * V(x, y)]$$
+   - **Scale Tradeoff:**
+     - Small $\sigma$ (e.g., 15): Strong dynamic range compression, captures fine edge details, but produces a washed-out, grayish "flat" appearance with noticeable edge halos.
+     - Large $\sigma$ (e.g., 250): Preserves overall tonal rendering and natural color rendition, but provides weaker dynamic range compression in deep shadows.
+4. **Multi-Scale Retinex (MSR) (Paper Eq. 3):**
+   - Combines multiple SSR estimates at different scales using weighted summation ($w_k = \frac{1}{3}$):
+     $$R_{\text{MSR}}(x, y) = \sum_{k=1}^{3} w_k R_{\text{SSR}, \sigma_k}(x, y), \quad \sigma \in \{15, 80, 250\}$$
+5. **Global Logarithmic Tone Mapping (Paper Eq. 4–5 vs. True Drago Operator):**
+   - **Paper's Formulation (Stockham Global Log Mapping):**
+     The paper references Drago et al. [6] but actually utilizes the classic logarithmic tone mapping formulation (historically attributed to Stockham/Tumblin):
+     - Computes the scene's logarithmic geometric mean (log-average luminance) $L_{wa}$:
+       $$L_{wa} = \exp\left(\frac{1}{N} \sum_{x, y} \log(\delta + V(x, y))\right)$$
+     - Compresses dynamic range via a constant-base logarithm:
+       $$L_g(x, y) = \frac{\log\left(\frac{V(x, y)}{L_{wa}} + 1\right)}{\log\left(\frac{L_{\max}}{L_{wa}} + 1\right)}$$
+   - **Distinction from True Drago Adaptive Logarithmic Operator:**
+     - In Frédéric Drago's true adaptive logarithmic tone mapping algorithm (*"Adaptive Logarithmic Mapping for Displaying High Contrast Scenes"*, Eurographics 2003), the base of the logarithm is **spatially adaptive**:
+       $$L_d(x, y) = \frac{L_d^{\max} \cdot 0.01}{\log_{10}(L_{\max} + 1)} \cdot \frac{\log\left(V'(x, y) + 1\right)}{\log\left(2 + 8 \cdot \left(\frac{V'(x,y)}{L_{\max}}\right)^{\frac{\log(b)}{\log(0.5)}}\right)}$$
+       where the logarithmic base smoothly varies from base 2 for dark pixels (yielding high contrast in shadows) to base 10 for bright highlights (compressing glare).
+     - **Implementation Note:** Following the paper's exact formulation (Eq. 4–5), we implemented the constant-base log operator specified in the paper text, while recognizing that this represents classic Stockham-style global logarithmic compression rather than the fully variable-base Drago operator.
+
+### Implementation ([`RetinexExperiment.java`](file:///d:/0Repositories/se2105_1728/src/main/java/com/rakin/se2105/RetinexExperiment.java))
+1. **Luminance Channel Float Conversion:**
+   - Converted the 8-bit $V$ channel to 32-bit floating point with offset $+1.0$ (avoiding $\log(0)$ division singularities).
+2. **SSR Pipeline:**
+   - Applied `Imgproc.GaussianBlur` with $\sigma \in \{15, 80, 250\}$.
+   - Calculated `Core.log()` on both original and blurred matrices, followed by `Core.subtract()`.
+   - Normalized results to $[0, 255]$ via `Core.NORM_MINMAX` and merged back with $H$ and $S$ channels.
+3. **MSR Pipeline:**
+   - Accumulated the 3 SSR float matrices with weights $\frac{1}{3}$ using `Core.scaleAdd()`.
+4. **Global Tone Mapping:**
+   - Evaluated Eq. 4–5 directly on normalized luminance floats $[0, 1.0]$.
+
+### Detailed Analysis of Output Images & Observations
+
+#### 1. Small Scale SSR (`ssr_sigma_15.jpg`)
+- **Visual Appearance:** Incredible detail revelation in shadows — every brick texture, window muntin, and dark foliage cluster is sharply carved out.
+- **Artifacts:** High-contrast boundaries exhibit glaring **halo artifacts** (a glowing band around the roofline and pillars against the sky). Global contrast feels flattened and desaturated.
+
+#### 2. Large Scale SSR (`ssr_sigma_250.jpg`)
+- **Visual Appearance:** Tonal balance is much more natural and photographic. Global contrast and lighting directionality are preserved.
+- **Trade-off:** Deep shadowed alcoves (under the portico) remain somewhat murky compared to $\sigma=15$. Halo artifacts around building edges are broader but softer.
+
+#### 3. Multi-Scale Retinex (`msr_output.jpg`)
+- **Visual Appearance:** Successfully bridges the gap between $\sigma=15$ and $\sigma=250$. It maintains good local contrast in shadow regions while preserving natural broad illumination gradients.
+- **The Core Problem Observed:** Despite combining scales, **Gaussian-based Retinex cannot avoid halo artifacts** at sharp structural edges (such as the white balustrade and pillars against the dark interior). Because Gaussian blur blurs across edges indiscriminately, the illumination estimate $L$ bleeds across high-contrast boundaries.
+
+#### 4. Global Logarithmic Tone Mapping (`stockham_global_log_mapped.jpg`)
+- **Visual Appearance:** Produces smooth, halo-free global luminance lifting. The dark foreground and building facade are lifted cleanly without any artificial edge glow.
+- **Limitation:** As a purely global operator, it treats all pixels with the same luminance value identically, meaning it cannot provide local contrast enhancement in deeply shadowed sub-regions.
+
+### Key Takeaway Motivating Phase 3
+Gaussian blur in Retinex blurs across sharp object edges, producing bright halos and dark fringing. To achieve halo-free local adaptation, **Phase 3 replaces the Gaussian surround filter with He et al.'s edge-preserving Guided Filter**.
