@@ -192,3 +192,70 @@ To determine precisely where and how much the two images differ, we developed [`
 
 ### Key Takeaway Motivating Phase 3
 Gaussian blur in Retinex blurs across sharp object edges, producing bright halos and dark fringing. To achieve halo-free local adaptation, **Phase 3 replaces the Gaussian surround filter with He et al.'s edge-preserving Guided Filter**.
+
+---
+
+## Phase 3
+
+### Overview
+- **Goal:** Eliminate Retinex halo artifacts by implementing Kaiming He et al.'s edge-preserving **Guided Filter** to replace the Gaussian surround filter, and build the complete **Local Adaptive Tone Mapping** pipeline per paper Eq. (6–12).
+- **Status:** Completed
+
+### Concepts & Mathematical Context
+1. **The Origin of Halo Artifacts:**
+   - In standard Retinex, the illumination estimate is computed as $L(x, y) = F(x, y) * V(x, y)$, where $F$ is a Gaussian kernel.
+   - Gaussian filters are spatial averaging filters: they smooth uniformly across structural boundaries. At sharp contrast edges (e.g., a bright white column adjacent to a dark interior), the Gaussian filter averages pixels from both sides of the edge.
+   - Consequently, $L(x, y)$ is underestimated on the bright side and overestimated on the dark side, resulting in bright halos and dark ringing when computing $\log V - \log L$.
+2. **Kaiming He's Guided Filter (Paper Eq. 6–9):**
+   - Assumes a local linear relationship between the guidance image $I$ and output $q$ in a local window $\omega_k$:
+     $$q_i = a_k I_i + b_k, \quad \forall i \in \omega_k$$
+   - Minimizes the squared reconstruction error with an $L_2$ regularization parameter $\epsilon$:
+     $$E(a_k, b_k) = \sum_{i \in \omega_k} \left((a_k I_i + b_k - p_i)^2 + \epsilon a_k^2\right)$$
+   - Analytical solution:
+     $$a_k = \frac{\frac{1}{|\omega|} \sum_{i \in \omega_k} I_i p_i - \mu_k \bar{p}_k}{\sigma_k^2 + \epsilon} = \frac{\text{cov}(I, p)}{\sigma_k^2 + \epsilon}$$
+     $$b_k = \bar{p}_k - a_k \mu_k$$
+   - In self-guided filtering, the input luminance is its own guide ($I = p = V$), so:
+     - When variance $\sigma_k^2 \gg \epsilon$ (high variance / edge region): $a_k \approx 1, b_k \approx 0 \implies q_i \approx I_i$ (**preserves edges**).
+     - When $\sigma_k^2 \ll \epsilon$ (flat / smooth region): $a_k \approx 0, b_k \approx \mu_k \implies q_i \approx \mu_k$ (**smooths flat areas**).
+3. **Local Adaptive Tone Mapping Pipeline (Paper Eq. 10–12):**
+   - **Contrast Enhancement Factor $a(x, y)$ (Eq. 10):**
+     $$a(x, y) = 1 + \eta \left(\frac{V(x, y)}{L_{\max}}\right), \quad \eta = 36$$
+     Dynamically amplifies local contrast based on pixel brightness relative to scene maximum $L_{\max}$.
+   - **Adaptive Nonlinear Offset $\beta$ (Eq. 11):**
+     $$\beta = \frac{1}{1 + \exp\left(-\lambda (L_{wa} - 0.5)\right)}, \quad \lambda = 10$$
+     A sigmoid function centered at $0.5$ driven by the scene log-average luminance $L_{wa}$, adaptively preventing underexposure in dark scenes.
+   - **Final Local Luminance Combination (Eq. 12):**
+     $$L_{\text{out}}(x, y) = a(x, y) \cdot [L_g(x, y) - \log H_g(x, y)] + \beta$$
+     where $L_g$ is the global log tone mapped luminance (Eq. 4) and $H_g$ is the guided surround estimate.
+
+### Implementation
+1. **Pure Java/OpenCV Guided Filter ([`GuidedFilter.java`](file:///d:/0Repositories/se2105_1728/src/main/java/com/rakin/se2105/GuidedFilter.java)):**
+   - Built a box-filter based $O(N)$ linear-time Guided Filter using `Imgproc.boxFilter()`.
+   - Computes local means, covariances, and regularized linear coefficients $a$ and $b$ entirely on 32-bit float Mats.
+2. **Phase 3 Pipeline ([`GuidedFilterExperiment.java`](file:///d:/0Repositories/se2105_1728/src/main/java/com/rakin/se2105/GuidedFilterExperiment.java)):**
+   - Applied self-guided filter ($r=16, \epsilon=0.01$) to compute $H_g$.
+   - Generated Guided-Retinex output and computed the amplified halo difference map against Gaussian SSR ($\sigma=15$).
+   - Calculated Eq. 10–12 with $\eta=36, \lambda=10$ and generated the final local adaptive tone-mapped result.
+
+### Detailed Analysis of Output Images & Observations
+
+#### 1. Guided-Retinex (`guided_retinex.jpg`)
+- **Visual Appearance:** Appears jarringly over-brightened, hyper-saturated, and "radioactive" (fluorescent lime green foliage, bleached sky, neon turf).
+- **Mathematical Root Cause:** 
+  1. *Asymmetric Log Distribution Skew:* Evaluating $R = \log(V) - \log(H_g)$ yields values with an extreme negative outlier floor ($R_{\min} \approx -6.44$) due to dark edge gradients, while $R_{\max} \approx +1.70$ and the vast bulk of scene pixels hover near $R_{\text{mean}} \approx -0.13$. 
+  2. *Naive Min-Max Normalization Distortion:* Linearly stretching $[R_{\min}, R_{\max}] \to [0, 255]$ maps the center of the distribution ($-0.13$) all the way up to $\approx 198 / 255$. Consequently, the average scene luminance skyrockets from an original $V \approx 64$ to $V \approx 197$.
+  3. *HSV Saturation Coupling:* In low-light images, deep foliage and surfaces carry high native saturation ($S$). Forcing luminance ($V$) near ceiling values while holding high saturation constant produces intense fluorescent neon hues.
+- **Key Algorithmic Lesson:** Raw log-reflectance $R_{\text{guided}} = \log V - \log H_g$ is **not meant to be an end-product image**. In the paper, $H_g$ is strictly an intermediate surround estimate designed to feed into the complete local adaptation equation (Eq. 12), rather than being linearly normalized directly into displayable RGB.
+- **Edge Integrity (The Positive Confirmation):** Despite the tonal skew, high-contrast boundaries (e.g., white columns against shaded building walls) show **zero halo glow**. Because the Guided Filter respects edges where local variance is high, illumination does not bleed across boundaries.
+
+#### 2. Halo Comparison Difference Map (`halo_comparison_diff_x5.jpg`)
+- **Visual Appearance:** Computed as $|R_{\text{Gaussian}}(\sigma=15) - R_{\text{Guided}}| \times 5$.
+- **Key Observation:** The diff map produces stark, bright glowing silhouettes strictly outlining the architectural columns, balconies, and roof cornices. This proves empirically that the difference between Gaussian and Guided Retinex is concentrated exactly in the **halo artifact zones** around high-contrast edges.
+
+#### 3. Full Local Adaptive Tone Mapping (`local_adaptive_tone_mapped.jpg`)
+- **Visual Appearance:** Combines global logarithmic compression $L_g$ with local edge-preserving contrast factor $a(x, y)$ and adaptive sigmoid baseline $\beta$. Highlights remain well-tamed, structural details are preserved without haloing, and midtones are naturally balanced.
+- **Why it avoids the "radioactive" effect:** Rather than performing an unconstrained min-max stretch on log-reflectance, Eq. (12) ($L_{\text{out}} = a(x,y) \cdot [L_g - \log H_g] + \beta$) anchors the dynamic range to the physically grounded global log luminance $L_g$, scaling local deviations proportionately via $a(x, y)$ and elevating the dark baseline via sigmoid $\beta$.
+- **Limitation & Observation (Motivating Phase 4):**
+  - While edge halos are eliminated, high-frequency local contrast amplification inherently amplifies sensor noise present in low-light shadows.
+  - Phase 4 introduces the **Dual-Tree Complex Wavelet Transform (DT-CWT)** and soft-threshold denoising to strip high-frequency noise from high-pass sub-bands before final reconstruction.
+
